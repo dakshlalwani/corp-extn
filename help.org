@@ -1,0 +1,192 @@
+#+TITLE: CORP-extn
+#+AUTHOR: Daksh Lalwani
+
+* Defining the global variable
+=tabURL= holds the url of the current tab opened on browser.
+#+NAME: globalVariable
+#+BEGIN_SRC javascript
+  var tabURL = "";
+#+END_SRC
+
+* tabURL value
+  -  when page load status is 'loading' till 'complete'
+     #+NAME: loadtabURL
+     #+BEGIN_SRC javascript
+       chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
+           chrome.tabs.query({currentWindow: true, active: true}, function (tabs) {
+               tabURL = tabs[0].url;
+           });
+       });
+     #+END_SRC
+
+  - when page load status is 'complete'
+    #+NAME: completetabURL
+    #+BEGIN_SRC javascript
+      chrome.tabs.onActivated.addListener(function (activeInfo) {
+          chrome.tabs.query({currentWindow: true, active: true}, function (tabs) {
+              tabURL = tabs[0].url;
+          });
+      });
+    #+END_SRC
+  
+* Parse the URL
+=parseURL(url)= function takes a URL and returns a objects which
+contains the URL's scheme, host, port, path and fragment seperately.
+#+NAME: parsingURL
+#+BEGIN_SRC javascript
+  function parseURL(url) {
+      var result = {};
+      var match = url.match(
+              /^([^:]+):\/\/([^\/:]*)(?::([\d]+))?(?:(\/[^#]*)(?:#(.*))?)?$/i);
+      if (!match)
+          return result;
+      result.scheme = match[1].toLowerCase();
+      result.host = match[2];
+      result.port = match[3] || 80;
+      result.path = match[4] || "/";
+      result.fragment = match[5];
+      return result;
+  }
+#+END_SRC
+
+* before request is made
+=chrome.webRequest.onBeforeRequest.addListener()= function takes a
+param info which contains the initiator, target url, method, type,
+timestamp, etc. of the request made.
+** Check if target origin has configured CORP
+   - check and save the value corresponding to the request URL from
+     the localStorage and save it in variable targetCORP.
+   - check if the request made is cross origin and convert the
+     string "targetCORP" into JS object literal for easier lookup.
+   - According to the request, save the responces into a dictionary.
+   - Check if the corresponding value of the key which is the type of
+     URL, is present in the dictionary or not.
+   - Block the request if value is 'DENY' and print the message.
+#+NAME: beforeRequest
+#+BEGIN_SRC javascript
+  chrome.webRequest.onBeforeRequest.addListener(function (info) {
+          var tabPageOrigin = parseURL(tabURL).scheme + parseURL(tabURL).host + parseURL(tabURL).port;
+          var targetOrigin = parseURL(info.url).scheme + parseURL(info.url).host + parseURL(info.url).port;
+          var targetCORP = localStorage[targetOrigin];
+          if (targetCORP && (tabPageOrigin !== targetOrigin)) {
+              var chromeTypes = {
+                  'image-src': 'image',
+                  'script-src': 'script',
+                  'frame-descendants': 'sub_frame',
+                  'style-src': 'stylesheet',
+                  'object-src': 'object',
+                  'xhr-src': 'xmlhttprequest'
+              };
+              var corpArray = targetCORP.split(';');
+              var corpObj = {};
+              for (var i = 0; i < corpArray.length; i++) {
+                  var keyValPair = corpArray[i].trim().split(' ');
+                  var key = keyValPair[0];
+                  if (chromeTypes[key]) {
+                      key = chromeTypes[key]
+                  }
+                  corpObj[key] = keyValPair[1].trim();
+              }
+              if (corpObj[info.type]) {
+                  var corpRestriction = corpObj[info.type];
+                  var requestedURL = info.url.trim();
+                  if (corpRestriction === "DENY") {
+                      printMessage(requestedURL, info.type, info.type + ' ' + corpRestriction);
+                      return {cancel: true};
+                  }
+                  if (requestedURL.indexOf(corpRestriction) !== -1) {
+                      console.log(timeStamp() + ": Resource allowed according to the CORP: " + requestedURL);
+                  }
+                  if (requestedURL.indexOf(corpRestriction) === -1) {
+                      printMessage(requestedURL, info.type, info.type + ' ' + corpRestriction);
+                      return {cancel: true};
+                  }
+              }
+              else {
+                  console.log('default-src:: info.type: ', info.type);
+                  if (corpObj['default-src'] === 'DENY') {
+                      printMessage(info.url, info.type, 'default-src DENY');
+                      return {cancel: true};
+                  }
+              }
+          }
+      },
+      {
+          urls: [
+              "http://localhost:*/*",
+              "http://*/*",
+          ],
+          types: ["image", "script", "sub_frame", "main_frame", "stylesheet", "object", "xmlhttprequest", "other"]
+      },
+      ["blocking"]);
+#+END_SRC
+
+* When a header is recieved
+=chrome.webRequest.onHeadersReceived.addListener()= function takes a
+param which contains the method, responseHeaders array, statusCode,
+type, url, etc. of the request made.
+** LocalStorage
+   - Recieves the header when the request is recieved.
+   - Save the request if the responseHeaders consist CORP in the localStorage.
+   - print message of CORP saved successfully.
+#+NAME: headerRecieve
+#+BEGIN_SRC javascript
+chrome.webRequest.onHeadersReceived.addListener(function (details) {
+        var responseOrigin = parseURL(details.url).scheme + parseURL(details.url).host + parseURL(details.url).port;
+        var tabPageOrigin = parseURL(tabURL).scheme + parseURL(tabURL).host + parseURL(tabURL).port;
+        if (responseOrigin === tabPageOrigin) {
+            for (var i = 0; i < details.responseHeaders.length; i++) {
+                if (details.responseHeaders[i].name.toLowerCase() === "CORP".toLowerCase()) {
+                    var j = i;
+                    var tabPageOrigin = parseURL(tabURL).scheme + parseURL(tabURL).host + parseURL(tabURL).port;
+                    var tempCORP = details.responseHeaders[j].value.toString();
+                    localStorage[tabPageOrigin] = tempCORP;
+                    console.log("CORP saved successfully:  ", tempCORP);
+                }
+            }
+        }
+    },
+    {urls: ["<all_urls>"]},
+    ['responseHeaders']
+);
+#+END_SRC
+
+* TimeStamp generator
+=timeStamp()= functions returns the current time which is needed to
+print with the response status.
+#+NAME: timeStamp
+#+BEGIN_SRC javascript
+  function timeStamp() {
+      var now = new Date();
+      var time = [now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds()];
+      for (var i = 1; i < 3; i++) {
+          if (time[i] < 10) {
+              time[i] = "0" + time[i];
+          }
+      }
+      return time.join(":");
+  }
+#+END_SRC
+
+* Print Messages
+=printMessage(url, type, policy)= prints the message using the three
+parameters.
+#+NAME: printmsg
+#+BEGIN_SRC javascript
+  function printMessage(url, type, policy) {
+      var msg = "Request to URL [" + url + "] by [" + type + "] is blocked by the policy [" + policy + "] at " + timeStamp();
+      console.log(msg);
+  }
+#+END_SRC
+
+* Tangle
+#+BEGIN_SRC javascript :tangle corp-extn.js :eval no :noweb yes
+      <<globalVariable>>
+      <<loadtabURL>>
+      <<completetabURL>>
+      <<beforeRequest>>
+      <<parsingURL>>
+      <<timeStamp>>
+      <<printmsg>>
+      <<headerRecieve>>
+#+END_SRC
